@@ -1,0 +1,14 @@
+torch
+torchvision
+torchaudio
+xformers
+sentencepiece
+numpy
+tqdm
+pytest
+pdfplumber
+tabulate
+ebooklib
+beautifulsoup4
+lxml
+pymupdf

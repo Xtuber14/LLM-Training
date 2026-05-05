@@ -71,7 +71,7 @@ def train_tokenizer(data_dir, vocab_size=32000, model_prefix="tokenizer"):
         bos_id=1,
         eos_id=2,
         unk_id=0,
-        user_defined_symbols=[],
+        user_defined_symbols=["<|start_table|>", "<|end_table|>"],
         unk_piece="<|unk|>",
         bos_piece="<|bos|>",
         eos_piece="<|eos|>",

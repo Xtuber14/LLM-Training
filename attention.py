@@ -3,19 +3,19 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-# Try importing xformers
-try:
-    from xformers.ops import memory_efficient_attention, LowerTriangularMask
-    USE_FLASH = "xformers"
-except ImportError:
+# Check for PyTorch 2.0+ native SDPA first as it is most compatible
+if hasattr(F, "scaled_dot_product_attention"):
+    USE_FLASH = "sdpa"
+else:
+    # Try importing xformers
     try:
-        from flash_attn import flash_attn_func
-        USE_FLASH = "flash_attn"
+        from xformers.ops import memory_efficient_attention, LowerTriangularMask
+        USE_FLASH = "xformers"
     except ImportError:
-        # Check for PyTorch 2.0+ native SDPA
-        if hasattr(F, "scaled_dot_product_attention"):
-            USE_FLASH = "sdpa"
-        else:
+        try:
+            from flash_attn import flash_attn_func
+            USE_FLASH = "flash_attn"
+        except ImportError:
             USE_FLASH = "chunked"
 
 def get_attention_backend():

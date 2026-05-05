@@ -51,6 +51,46 @@ def small() -> ModelConfig:
         ffn_hidden_dim=get_ffn_dim(d_model)
     )
 
+def colab() -> ModelConfig:
+    """Config optimized for Colab T4 (16GB VRAM)."""
+    d_model = 896
+    n_layers = 14
+    n_heads = 14
+    n_kv_heads = 2
+    vocab_size = 32000
+    ctx_len = 2048
+    ffn_hidden_dim = get_ffn_dim(d_model)
+    return ModelConfig(
+        d_model=d_model,
+        n_layers=n_layers,
+        n_heads=n_heads,
+        n_kv_heads=n_kv_heads,
+        vocab_size=vocab_size,
+        ctx_len=ctx_len,
+        ffn_hidden_dim=ffn_hidden_dim
+    )
+
+def colab_max() -> ModelConfig:
+    """The absolute limit for Colab T4 (16GB VRAM) - ~750M parameters.
+    Requires --grad_checkpoint to be enabled during training.
+    """
+    d_model = 1536
+    n_layers = 24
+    n_heads = 12
+    n_kv_heads = 3
+    vocab_size = 32000
+    ctx_len = 2048
+    ffn_hidden_dim = get_ffn_dim(d_model)
+    return ModelConfig(
+        d_model=d_model,
+        n_layers=n_layers,
+        n_heads=n_heads,
+        n_kv_heads=n_kv_heads,
+        vocab_size=vocab_size,
+        ctx_len=ctx_len,
+        ffn_hidden_dim=ffn_hidden_dim
+    )
+
 def medium() -> ModelConfig:
     d_model = 1024
     return ModelConfig(

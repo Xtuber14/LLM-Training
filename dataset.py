@@ -55,23 +55,89 @@ def extract_text_from_epub(epub_path):
         print(f"Error reading {epub_path}: {e}")
         return ""
 
+def table_to_markdown(table):
+    """Convert a 2D list (table) to a Markdown table."""
+    from tabulate import tabulate
+    if not table or not any(table):
+        return ""
+    # Clean up cells: remove None and strip whitespace
+    cleaned_table = []
+    for row in table:
+        cleaned_row = [str(cell).strip() if cell is not None else "" for cell in row]
+        # Skip completely empty rows
+        if any(cleaned_row):
+            cleaned_table.append(cleaned_row)
+    
+    if not cleaned_table:
+        return ""
+        
+    # Use the first row as header if it looks like one, or generic headers
+    try:
+        return tabulate(cleaned_table, tablefmt="github", headers="firstrow")
+    except:
+        return tabulate(cleaned_table, tablefmt="github")
+
 def extract_text_from_pdf(pdf_path):
-    """Extract clean text from a PDF file using PyMuPDF."""
-    import fitz  # pymupdf
+    """Extract clean text and tables from a PDF file using fitz (text) and pdfplumber (tables)."""
+    import fitz
+    import pdfplumber
+    import logging
+    from tqdm import tqdm
+    
+    # Suppress noisy warnings from both libraries
+    logging.getLogger('pdfminer').setLevel(logging.ERROR)
+    try:
+        fitz.TOOLS.mupdf_display_errors(False)
+    except:
+        pass
     
     try:
-        doc = fitz.open(pdf_path)
         pages = []
-        for page in doc:
-            text = page.get_text("text")
-            if text.strip():
-                pages.append(text.strip())
-        doc.close()
+        doc = fitz.open(pdf_path)
+        pdf = pdfplumber.open(pdf_path)
         
+        num_pages = len(doc)
+        page_indices = range(num_pages)
+        
+        # Always show progress for PDFs with many pages to reassure the user
+        desc = f"Reading {os.path.basename(pdf_path)}"
+        page_indices = tqdm(range(num_pages), desc=desc, leave=False)
+            
+        for i in page_indices:
+            # 1. Fast text extraction with fitz
+            text = doc[i].get_text()
+            
+            # 2. Table extraction with pdfplumber (only if needed or for every page)
+            markdown_tables = []
+            try:
+                # pdfplumber can be slow, so we only call it on the specific page
+                p_page = pdf.pages[i]
+                tables = p_page.extract_tables()
+                for table in tables:
+                    md = table_to_markdown(table)
+                    if md:
+                        markdown_tables.append(md)
+            except:
+                pass # Skip page if table extraction fails
+            
+            page_content = []
+            if text:
+                text = re.sub(r'[ \t]+', ' ', text.strip())
+                page_content.append(text)
+            if markdown_tables:
+                page_content.append("\n\n<|start_table|>\n### Extracted Tables:\n" + "\n\n".join(markdown_tables) + "\n<|end_table|>\n")
+            
+            if page_content:
+                pages.append("\n\n".join(page_content))
+                
+        doc.close()
+        pdf.close()
+                    
+        if not pages:
+            return ""
+            
         full_text = "\n\n".join(pages)
-        # Clean up common PDF artifacts
-        full_text = re.sub(r'\n{3,}', '\n\n', full_text)  # Collapse excessive newlines
-        full_text = re.sub(r'[ \t]+', ' ', full_text)      # Collapse spaces/tabs
+        full_text = re.sub(r'\n{3,}', '\n\n', full_text)
         return full_text
     except Exception as e:
         print(f"Error reading {pdf_path}: {e}")
@@ -181,7 +247,9 @@ def get_dataloader(memmap_file, batch_size, ctx_len, pad_id=3, num_workers=4):
     )
 
 if __name__ == "__main__":
-    prepare_data("training_data/")
-
-if __name__ == "__main__":
-    prepare_data("training_data/")
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--data_dir", type=str, default="training_data/", help="Directory containing PDFs/EPUBs")
+    args = parser.parse_args()
+    
+    prepare_data(args.data_dir)

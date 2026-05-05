@@ -8,3 +8,9 @@ sentencepiece
 numpy
 tqdm
 pytest
+pdfplumber
+tabulate
+ebooklib
+beautifulsoup4
+lxml
+pymupdf

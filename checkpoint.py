@@ -37,3 +37,20 @@ def load_latest_checkpoint(checkpoint_dir):
         checkpoint.get('config_name'),
         checkpoint.get('config')
     )
+
+def cleanup_checkpoints(checkpoint_dir, keep_last=5):
+    """Keep only the most recent N checkpoints."""
+    checkpoints = glob.glob(os.path.join(checkpoint_dir, "step_*.pt"))
+    if len(checkpoints) <= keep_last:
+        return
+    
+    # Sort by step number
+    checkpoints.sort(key=lambda x: int(os.path.basename(x).split('_')[1].split('.')[0]))
+    
+    # Remove older ones
+    for ckpt in checkpoints[:-keep_last]:
+        try:
+            os.remove(ckpt)
+            print(f"Removed old checkpoint: {ckpt}")
+        except Exception as e:
+            print(f"Error removing {ckpt}: {e}")
