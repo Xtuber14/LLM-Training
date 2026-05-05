@@ -1,0 +1,10 @@
+# AMD ROCm dependencies
+--extra-index-url https://download.pytorch.org/whl/rocm6.2
+torch
+torchvision
+torchaudio
+xformers
+sentencepiece
+numpy
+tqdm
+pytest
