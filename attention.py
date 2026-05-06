@@ -66,18 +66,24 @@ def apply_chunked_attention(q, k, v, mask=None, chunk_size=512):
         
     return out
 
-def flash_attention(q, k, v, causal=True):
+def flash_attention(q, k, v, causal=True, enable_gqa=False):
     """
     Dispatcher for attention implementations.
     Expects inputs in shape: (batch, seq_len, n_heads, head_dim)
     """
     if USE_FLASH == "xformers":
+        if enable_gqa and q.size(2) != k.size(2):
+            k = torch.repeat_interleave(k, q.size(2) // k.size(2), dim=2)
+            v = torch.repeat_interleave(v, q.size(2) // v.size(2), dim=2)
         return memory_efficient_attention(
             q, k, v, 
             attn_bias=LowerTriangularMask() if causal else None
         )
         
     elif USE_FLASH == "flash_attn":
+        if enable_gqa and q.size(2) != k.size(2):
+            k = torch.repeat_interleave(k, q.size(2) // k.size(2), dim=2)
+            v = torch.repeat_interleave(v, q.size(2) // v.size(2), dim=2)
         return flash_attn_func(q, k, v, causal=causal)
     
     elif USE_FLASH == "sdpa":
@@ -85,11 +91,14 @@ def flash_attention(q, k, v, causal=True):
         q = q.transpose(1, 2)
         k = k.transpose(1, 2)
         v = v.transpose(1, 2)
-        out = F.scaled_dot_product_attention(q, k, v, is_causal=causal)
+        out = F.scaled_dot_product_attention(q, k, v, is_causal=causal, enable_gqa=enable_gqa)
         return out.transpose(1, 2).contiguous()
         
     else:
         # Fallback expects (B, H, T, D)
+        if enable_gqa and q.size(2) != k.size(2):
+            k = torch.repeat_interleave(k, q.size(2) // k.size(2), dim=2)
+            v = torch.repeat_interleave(v, q.size(2) // v.size(2), dim=2)
         q = q.transpose(1, 2)
         k = k.transpose(1, 2)
         v = v.transpose(1, 2)

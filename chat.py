@@ -15,6 +15,7 @@ from config import nano, small, medium, ModelConfig
 from model import Transformer
 from tokenizer import Tokenizer
 from sft_dataset import ROLE_SYSTEM, ROLE_USER, ROLE_ASSISTANT
+from inference_utils import get_inference_dtype, autocast_context, sample_next_token
 
 torch.serialization.add_safe_globals([ModelConfig])
 
@@ -27,49 +28,29 @@ def chat_generate(model, tokenizer, conversation_ids, max_new_tokens=512,
     Uses KV cache for efficient autoregressive generation.
     """
     device = next(model.parameters()).device
+    dtype = get_inference_dtype(device.type)
     model.eval()
+    model.reset_cache()
     
     x = torch.tensor(conversation_ids, dtype=torch.long, device=device).unsqueeze(0)
     
-    # Prefill the full conversation context
-    logits = model(x, start_pos=0, use_cache=True)
-    next_token_logits = logits[0, -1, :] / temperature
-    
-    def sample(logits):
-        if top_k > 0:
-            v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
-            logits[logits < v[-1]] = -float('Inf')
-        if top_p < 1.0:
-            sorted_logits, sorted_indices = torch.sort(logits, descending=True)
-            cumulative_probs = torch.cumsum(torch.softmax(sorted_logits, dim=-1), dim=-1)
-            sorted_indices_to_remove = cumulative_probs > top_p
-            sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
-            sorted_indices_to_remove[..., 0] = 0
-            indices_to_remove = sorted_indices_to_remove.scatter(
-                dim=-1, index=sorted_indices, src=sorted_indices_to_remove
-            )
-            logits[indices_to_remove] = -float('Inf')
-        probs = torch.softmax(logits, dim=-1)
-        return torch.multinomial(probs, num_samples=1)
+    with autocast_context(device.type, dtype):
+        logits = model(x, start_pos=0, use_cache=True)
     
     generated_tokens = []
-    next_token = sample(next_token_logits)
-    generated_tokens.append(next_token.item())
+    next_token = sample_next_token(logits[0, -1, :], temperature=temperature, top_p=top_p, top_k=top_k)
     
     curr_pos = len(conversation_ids)
     
-    for _ in range(max_new_tokens - 1):
-        logits = model(next_token.unsqueeze(0), start_pos=curr_pos, use_cache=True)
-        next_token_logits = logits[0, -1, :] / temperature
-        next_token = sample(next_token_logits)
-        
+    for _ in range(max_new_tokens):
         token_id = next_token.item()
-        generated_tokens.append(token_id)
-        curr_pos += 1
-        
-        # Stop on EOS
         if token_id == tokenizer.eos_id:
             break
+        generated_tokens.append(token_id)
+        with autocast_context(device.type, dtype):
+            logits = model(next_token.unsqueeze(0), start_pos=curr_pos, use_cache=True)
+        next_token = sample_next_token(logits[0, -1, :], temperature=temperature, top_p=top_p, top_k=top_k)
+        curr_pos += 1
     
     # Decode, stripping the EOS token from output
     if generated_tokens and generated_tokens[-1] == tokenizer.eos_id:
@@ -179,52 +160,16 @@ def main():
         
         # Generate
         print("Assistant: ", end="", flush=True)
-        
-        # For streaming, we generate token by token
-        device = next(model.parameters()).device
-        model.eval()
-        
-        x = torch.tensor(conv_ids, dtype=torch.long, device=device).unsqueeze(0)
-        logits = model(x, start_pos=0, use_cache=True)
-        next_token_logits = logits[0, -1, :] / args.temperature
-        
-        def sample_token(lgt):
-            if args.top_k > 0:
-                v, _ = torch.topk(lgt, min(args.top_k, lgt.size(-1)))
-                lgt[lgt < v[-1]] = -float('Inf')
-            if args.top_p < 1.0:
-                sorted_logits, sorted_indices = torch.sort(lgt, descending=True)
-                cumulative_probs = torch.cumsum(torch.softmax(sorted_logits, dim=-1), dim=-1)
-                sorted_indices_to_remove = cumulative_probs > args.top_p
-                sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
-                sorted_indices_to_remove[..., 0] = 0
-                indices_to_remove = sorted_indices_to_remove.scatter(
-                    dim=-1, index=sorted_indices, src=sorted_indices_to_remove
-                )
-                lgt[indices_to_remove] = -float('Inf')
-            probs = torch.softmax(lgt, dim=-1)
-            return torch.multinomial(probs, num_samples=1)
-        
-        generated_tokens = []
-        next_token = sample_token(next_token_logits)
-        curr_pos = len(conv_ids)
-        
-        response_text = ""
-        for _ in range(args.max_new_tokens):
-            token_id = next_token.item()
-            
-            if token_id == tokenizer.eos_id:
-                break
-            
-            generated_tokens.append(token_id)
-            decoded = tokenizer.decode([token_id])
-            print(decoded, end="", flush=True)
-            response_text += decoded
-            
-            curr_pos += 1
-            logits = model(next_token.unsqueeze(0), start_pos=curr_pos - 1, use_cache=True)
-            next_token_logits = logits[0, -1, :] / args.temperature
-            next_token = sample_token(next_token_logits)
+        response_text = chat_generate(
+            model,
+            tokenizer,
+            conv_ids,
+            max_new_tokens=args.max_new_tokens,
+            temperature=args.temperature,
+            top_p=args.top_p,
+            top_k=args.top_k,
+        )
+        print(response_text, end="")
         
         print()  # Newline after response
         

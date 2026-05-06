@@ -4,6 +4,7 @@ import math
 import argparse
 import torch
 from pathlib import Path
+import inspect
 
 from config import get_train_config, nano, small, medium
 from model import Transformer
@@ -11,6 +12,36 @@ from tokenizer import Tokenizer
 from dataset import get_dataloader
 from lr_schedule import get_lr
 from checkpoint import save_checkpoint, load_latest_checkpoint
+from inference_utils import autocast_context
+
+
+def build_optimizer(optim_groups, lr, betas, eps):
+    kwargs = {"lr": lr, "betas": betas, "eps": eps}
+    if "fused" in inspect.signature(torch.optim.AdamW).parameters and torch.cuda.is_available():
+        kwargs["fused"] = True
+    return torch.optim.AdamW(optim_groups, **kwargs)
+
+
+def configure_training_backends(device):
+    if device != "cuda":
+        return
+    torch.set_float32_matmul_precision("high")
+    torch.backends.cudnn.benchmark = True
+    # Safe best-effort backend toggles across CUDA and ROCm builds.
+    try:
+        torch.backends.cuda.matmul.allow_tf32 = True
+    except Exception:
+        pass
+    try:
+        torch.backends.cudnn.allow_tf32 = True
+    except Exception:
+        pass
+    try:
+        torch.backends.cuda.enable_flash_sdp(True)
+        torch.backends.cuda.enable_mem_efficient_sdp(True)
+        torch.backends.cuda.enable_math_sdp(True)
+    except Exception:
+        pass
 
 def train():
     parser = argparse.ArgumentParser()
@@ -26,11 +57,14 @@ def train():
     parser.add_argument("--grad_checkpoint", action="store_true")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--compile", action="store_true")
+    parser.add_argument("--num_workers", type=int, default=None)
+    parser.add_argument("--prefetch_factor", type=int, default=2)
     args = parser.parse_args()
 
     # Hardware setup
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Using device: {device}")
+    configure_training_backends(device)
     
     if device == "cuda":
         print(f"Device name: {torch.cuda.get_device_name(0)}")
@@ -91,7 +125,13 @@ def train():
                 raise FileNotFoundError(f"Data not found in {args.data_dir} or root. Run dataset.py first.")
     
     print(f"Loading data from: {train_bin}")
-    loader = get_dataloader(train_bin, args.batch_size, model_config.ctx_len)
+    loader = get_dataloader(
+        train_bin,
+        args.batch_size,
+        model_config.ctx_len,
+        num_workers=args.num_workers,
+        prefetch_factor=args.prefetch_factor,
+    )
     
     # Model Setup
     model = Transformer(model_config)
@@ -109,7 +149,12 @@ def train():
         {'params': decay_params, 'weight_decay': train_config.weight_decay},
         {'params': nodecay_params, 'weight_decay': 0.0}
     ]
-    optimizer = torch.optim.AdamW(optim_groups, lr=train_config.lr, betas=train_config.betas, eps=train_config.eps)
+    optimizer = build_optimizer(
+        optim_groups,
+        lr=train_config.lr,
+        betas=train_config.betas,
+        eps=train_config.eps,
+    )
     
     scaler = torch.amp.GradScaler('cuda', enabled=(dtype == torch.float16))
     
@@ -143,16 +188,21 @@ def train():
                 data_iter = iter(loader)
                 x, y = next(data_iter)
                 
-            x, y = x.to(device), y.to(device)
+            x = x.to(device, non_blocking=(device == "cuda"))
+            y = y.to(device, non_blocking=(device == "cuda"))
             
-            with torch.autocast(device_type=device, dtype=dtype):
+            with autocast_context(device, dtype):
                 logits = model(x, use_checkpointing=args.grad_checkpoint)
-                logits_flat = logits.view(-1, logits.size(-1))
+                logits_flat = logits.reshape(-1, logits.size(-1))
                 y_flat = y.view(-1)
                 
                 loss = torch.nn.functional.cross_entropy(logits_flat, y_flat, ignore_index=-100, reduction='none')
                 
                 if start_table_id != -1:
+                    has_table_tokens = bool((y == start_table_id).any().item() or (y == end_table_id).any().item())
+                else:
+                    has_table_tokens = False
+                if has_table_tokens:
                     is_table_start = (y == start_table_id)
                     is_table_end = (y == end_table_id)
                     table_mask = (torch.cumsum(is_table_start.int(), dim=1) > torch.cumsum(is_table_end.int(), dim=1))
@@ -168,6 +218,12 @@ def train():
             
         scaler.unscale_(optimizer)
         grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), train_config.grad_clip)
+        if not torch.isfinite(grad_norm):
+            optimizer.zero_grad(set_to_none=True)
+            scaler.update()
+            if step % args.log_interval == 0:
+                print(f"Step {step} | Skipping update due to non-finite grad norm: {grad_norm}")
+            continue
         scaler.step(optimizer)
         scaler.update()
             

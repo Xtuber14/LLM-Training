@@ -20,6 +20,7 @@ import math
 import argparse
 import torch
 from pathlib import Path
+import inspect
 
 from config import get_train_config, nano, small, medium, ModelConfig
 from model import Transformer
@@ -27,8 +28,36 @@ from tokenizer import Tokenizer
 from sft_dataset import get_sft_dataloader, ROLE_SYSTEM, ROLE_USER, ROLE_ASSISTANT
 from lr_schedule import get_lr
 from checkpoint import save_checkpoint, load_latest_checkpoint
+from inference_utils import autocast_context
 
 torch.serialization.add_safe_globals([ModelConfig])
+
+def build_optimizer(optim_groups, lr, betas, eps):
+    kwargs = {"lr": lr, "betas": betas, "eps": eps}
+    if "fused" in inspect.signature(torch.optim.AdamW).parameters and torch.cuda.is_available():
+        kwargs["fused"] = True
+    return torch.optim.AdamW(optim_groups, **kwargs)
+
+
+def configure_training_backends(device):
+    if device != "cuda":
+        return
+    torch.set_float32_matmul_precision("high")
+    torch.backends.cudnn.benchmark = True
+    try:
+        torch.backends.cuda.matmul.allow_tf32 = True
+    except Exception:
+        pass
+    try:
+        torch.backends.cudnn.allow_tf32 = True
+    except Exception:
+        pass
+    try:
+        torch.backends.cuda.enable_flash_sdp(True)
+        torch.backends.cuda.enable_mem_efficient_sdp(True)
+        torch.backends.cuda.enable_math_sdp(True)
+    except Exception:
+        pass
 
 
 def sft_train():
@@ -46,18 +75,21 @@ def sft_train():
                         help="Peak learning rate (SFT uses much lower LR than pretraining)")
     parser.add_argument("--warmup_steps", type=int, default=50)
     parser.add_argument("--log_interval", type=int, default=1)
-    parser.add_argument("--save_interval", type=int, default=1)
+    parser.add_argument("--save_interval", type=int, default=200)
     parser.add_argument("--eval_interval", type=int, default=100)
     parser.add_argument("--grad_checkpoint", action="store_true")
     parser.add_argument("--max_samples", type=int, default=None,
                         help="Limit number of training samples (for testing)")
     parser.add_argument("--output_dir", type=str, default="checkpoints_sft",
                         help="Directory to save SFT checkpoints")
+    parser.add_argument("--num_workers", type=int, default=None)
+    parser.add_argument("--prefetch_factor", type=int, default=2)
     args = parser.parse_args()
 
     # ── Hardware ─────────────────────────────────────────────────────────
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Using device: {device}")
+    configure_training_backends(device)
     
     if device == "cuda":
         print(f"Device name: {torch.cuda.get_device_name(0)}")
@@ -113,7 +145,9 @@ def sft_train():
     print(f"\nLoading SFT data from: {args.data}")
     train_loader = get_sft_dataloader(
         args.data, tokenizer, config.ctx_len, args.batch_size, 
-        max_samples=args.max_samples
+        max_samples=args.max_samples,
+        num_workers=args.num_workers,
+        prefetch_factor=args.prefetch_factor,
     )
     
     val_loader = None
@@ -121,7 +155,10 @@ def sft_train():
         print(f"Loading validation data from: {args.val_data}")
         val_loader = get_sft_dataloader(
             args.val_data, tokenizer, config.ctx_len, 
-            batch_size=args.batch_size, max_samples=args.max_samples
+            batch_size=args.batch_size,
+            max_samples=args.max_samples,
+            num_workers=args.num_workers,
+            prefetch_factor=args.prefetch_factor,
         )
 
     # ── Optimizer (SFT-specific hyperparameters) ─────────────────────────
@@ -139,9 +176,7 @@ def sft_train():
         {'params': nodecay_params, 'weight_decay': 0.0}
     ]
     
-    optimizer = torch.optim.AdamW(
-        optim_groups, lr=args.lr, betas=(0.9, 0.95), eps=1e-8
-    )
+    optimizer = build_optimizer(optim_groups, lr=args.lr, betas=(0.9, 0.95), eps=1e-8)
     
     # Mixed precision scaler (only for FP16, not BF16)
     scaler = torch.amp.GradScaler('cuda', enabled=(dtype == torch.float16))
@@ -161,12 +196,13 @@ def sft_train():
         for x, y in loader:
             if batches >= max_batches:
                 break
-            x, y = x.to(device), y.to(device)
+            x = x.to(device, non_blocking=(device == "cuda"))
+            y = y.to(device, non_blocking=(device == "cuda"))
             
-            with torch.autocast(device_type=device, dtype=dtype):
+            with autocast_context(device, dtype):
                 logits = model(x)
                 loss = torch.nn.functional.cross_entropy(
-                    logits.view(-1, logits.size(-1)),
+                    logits.reshape(-1, logits.size(-1)),
                     y.view(-1),
                     ignore_index=-100
                 )
@@ -217,12 +253,13 @@ def sft_train():
                 data_iter = iter(train_loader)
                 x, y = next(data_iter)
             
-            x, y = x.to(device), y.to(device)
+            x = x.to(device, non_blocking=(device == "cuda"))
+            y = y.to(device, non_blocking=(device == "cuda"))
             
-            with torch.autocast(device_type=device, dtype=dtype):
+            with autocast_context(device, dtype):
                 logits = model(x, use_checkpointing=args.grad_checkpoint)
                 loss = torch.nn.functional.cross_entropy(
-                    logits.view(-1, logits.size(-1)),
+                    logits.reshape(-1, logits.size(-1)),
                     y.view(-1),
                     ignore_index=-100
                 )
@@ -238,6 +275,12 @@ def sft_train():
         # Optimizer step
         scaler.unscale_(optimizer)
         grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        if not torch.isfinite(grad_norm):
+            optimizer.zero_grad(set_to_none=True)
+            scaler.update()
+            if step % args.log_interval == 0:
+                print(f"Step {step} | Skipping update due to non-finite grad norm: {grad_norm}")
+            continue
         scaler.step(optimizer)
         scaler.update()
         

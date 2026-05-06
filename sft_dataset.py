@@ -19,11 +19,16 @@ not to parrot instructions.
 """
 
 import json
+import os
 import torch
-import numpy as np
 from torch.utils.data import Dataset, DataLoader
 from pathlib import Path
 from tokenizer import Tokenizer
+
+
+def _recommended_num_workers():
+    cpu_count = os.cpu_count() or 1
+    return min(2, max(0, cpu_count - 1))
 
 # ── Chat Template ────────────────────────────────────────────────────────────
 # Uses text-based role markers that tokenize naturally with any SentencePiece
@@ -146,7 +151,10 @@ class SFTDataset(Dataset):
                         print(f"Warning: Unknown format at {f}:{line_num}, skipping")
                         continue
                     
-                    self.samples.append(messages)
+                    input_ids, labels = format_conversation(messages, self.tokenizer)
+                    input_ids = input_ids[:self.ctx_len]
+                    labels = labels[:self.ctx_len]
+                    self.samples.append((input_ids, labels))
                     
                     if max_samples and len(self.samples) >= max_samples:
                         break
@@ -162,8 +170,7 @@ class SFTDataset(Dataset):
     
     def _print_example(self, idx):
         """Print a formatted example showing what the model will see."""
-        messages = self.samples[idx]
-        input_ids, labels = format_conversation(messages, self.tokenizer)
+        input_ids, labels = self.samples[idx]
         
         # Truncate for display
         display_len = min(len(input_ids), 200)
@@ -185,13 +192,7 @@ class SFTDataset(Dataset):
         return len(self.samples)
     
     def __getitem__(self, idx):
-        messages = self.samples[idx]
-        input_ids, labels = format_conversation(messages, self.tokenizer)
-        
-        # Truncate to ctx_len + 1 (need one extra for the shifted label)
-        if len(input_ids) > self.ctx_len:
-            input_ids = input_ids[:self.ctx_len]
-            labels = labels[:self.ctx_len]
+        input_ids, labels = self.samples[idx]
         
         # For causal LM: x = tokens[:-1], y = tokens[1:]
         # But in SFT, labels are already aligned with input_ids.
@@ -217,17 +218,24 @@ class SFTDataset(Dataset):
 
 
 def get_sft_dataloader(data_path, tokenizer, ctx_len, batch_size, 
-                       max_samples=None, num_workers=2):
+                       max_samples=None, num_workers=None, prefetch_factor=2):
     """Create a DataLoader for SFT training."""
     dataset = SFTDataset(data_path, tokenizer, ctx_len, max_samples)
-    return DataLoader(
-        dataset,
+    if num_workers is None:
+        num_workers = _recommended_num_workers()
+    pin_memory = torch.cuda.is_available()
+    loader_kwargs = dict(
+        dataset=dataset,
         batch_size=batch_size,
         shuffle=True,
         num_workers=num_workers,
-        pin_memory=True,
-        drop_last=False
+        pin_memory=pin_memory,
+        persistent_workers=(num_workers > 0),
+        drop_last=False,
     )
+    if num_workers > 0:
+        loader_kwargs["prefetch_factor"] = prefetch_factor
+    return DataLoader(**loader_kwargs)
 
 
 # ── CLI: Preview a dataset ───────────────────────────────────────────────────

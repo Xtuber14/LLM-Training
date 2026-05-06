@@ -4,6 +4,7 @@ from dataset import MemmapDataset
 from torch.utils.data import DataLoader
 from model import Transformer
 from config import nano, small, medium, ModelConfig
+from inference_utils import autocast_context
 
 torch.serialization.add_safe_globals([ModelConfig])
 import argparse
@@ -23,11 +24,12 @@ def evaluate_perplexity(model, data_file, batch_size=4):
     total_tokens = 0
     
     for x, y in loader:
-        x, y = x.to(device), y.to(device)
+        x = x.to(device, non_blocking=(device.type == "cuda"))
+        y = y.to(device, non_blocking=(device.type == "cuda"))
         logits = model(x)
         
         # Reshape for cross entropy
-        logits_flat = logits.view(-1, logits.size(-1))
+        logits_flat = logits.reshape(-1, logits.size(-1))
         y_flat = y.view(-1)
         
         # Calculate loss (sum reduction to count tokens properly)
@@ -50,7 +52,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
     
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    dtype = torch.bfloat16 if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else torch.float32
+    dtype = torch.bfloat16 if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else torch.float16
     
     from tokenizer import Tokenizer
     tokenizer = Tokenizer()
@@ -75,7 +77,7 @@ if __name__ == "__main__":
     model.to(device)
     
     print(f"Evaluating perplexity on {args.data_file}...")
-    with torch.autocast(device_type=device, dtype=dtype):
+    with autocast_context(device, dtype):
         ppl, loss = evaluate_perplexity(model, args.data_file)
     print(f"Cross Entropy Loss: {loss:.4f}")
     print(f"Perplexity: {ppl:.4f}")

@@ -45,21 +45,16 @@ def train_tokenizer(data_dir, vocab_size=32000, model_prefix="tokenizer"):
     
     # We need to create a temporary file with all text for sentencepiece
     temp_text_file = "all_text.txt"
+    from dataset import extract_text_from_file
     files = []
-    for ext in ["*.md", "*.epub", "*.pdf"]:
+    for ext in ["*.md", "*.txt", "*.srt", "*.vtt", "*.ass", "*.ssa", "*.epub", "*.pdf"]:
         files.extend(list(Path(data_dir).rglob(ext)))
     
     with open(temp_text_file, "w", encoding="utf-8") as out:
         for file_path in files:
-            if file_path.suffix.lower() == ".md":
-                with open(file_path, "r", encoding="utf-8") as f:
-                    out.write(f.read() + "\n")
-            elif file_path.suffix.lower() == ".epub":
-                from dataset import extract_text_from_epub
-                out.write(extract_text_from_epub(str(file_path)) + "\n")
-            elif file_path.suffix.lower() == ".pdf":
-                from dataset import extract_text_from_pdf
-                out.write(extract_text_from_pdf(str(file_path)) + "\n")
+            text = extract_text_from_file(str(file_path))
+            if text:
+                out.write(text + "\n")
     
     spm.SentencePieceTrainer.train(
         input=temp_text_file,
