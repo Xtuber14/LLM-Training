@@ -1,6 +1,12 @@
 from pathlib import Path
 
-from dataset import extract_text_from_subtitles, extract_text_from_txt, normalize_text
+from dataset import (
+    extract_text_from_file,
+    extract_text_from_subtitles,
+    extract_text_from_txt,
+    iter_training_files,
+    normalize_text,
+)
 
 
 def test_extract_text_from_txt(tmp_path):
@@ -41,3 +47,28 @@ def test_extract_text_from_ass(tmp_path):
 def test_normalize_text():
     raw = "A\u00a0B\r\n\r\n\r\nC"
     assert normalize_text(raw) == "A B\n\nC"
+
+
+def test_iter_training_files_includes_nested_code_files(tmp_path):
+    code_dir = tmp_path / "src" / "nested"
+    code_dir.mkdir(parents=True)
+    code_file = code_dir / "main.cpp"
+    code_file.write_text("int main() { return 0; }\n", encoding="utf-8")
+
+    files = iter_training_files(tmp_path)
+
+    assert code_file in files
+
+
+def test_extract_code_file_includes_directory_metadata(tmp_path):
+    code_dir = tmp_path / "java" / "com" / "example"
+    code_dir.mkdir(parents=True)
+    code_file = code_dir / "App.java"
+    code_file.write_text("class App { }\n", encoding="utf-8")
+
+    text = extract_text_from_file(str(code_file), root_dir=tmp_path)
+
+    assert "File: java/com/example/App.java" in text
+    assert "Directory: java/com/example" in text
+    assert "Language: java" in text
+    assert "class App" in text

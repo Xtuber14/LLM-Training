@@ -45,14 +45,12 @@ def train_tokenizer(data_dir, vocab_size=32000, model_prefix="tokenizer"):
     
     # We need to create a temporary file with all text for sentencepiece
     temp_text_file = "all_text.txt"
-    from dataset import extract_text_from_file
-    files = []
-    for ext in ["*.md", "*.txt", "*.srt", "*.vtt", "*.ass", "*.ssa", "*.epub", "*.pdf"]:
-        files.extend(list(Path(data_dir).rglob(ext)))
+    from dataset import extract_text_from_file, iter_training_files
+    files = iter_training_files(data_dir)
     
     with open(temp_text_file, "w", encoding="utf-8") as out:
         for file_path in files:
-            text = extract_text_from_file(str(file_path))
+            text = extract_text_from_file(str(file_path), root_dir=data_dir)
             if text:
                 out.write(text + "\n")
     
@@ -80,7 +78,7 @@ def train_tokenizer(data_dir, vocab_size=32000, model_prefix="tokenizer"):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data_dir", type=str, required=True, help="Directory containing .md files")
+    parser.add_argument("--data_dir", type=str, required=True, help="Directory containing training files")
     parser.add_argument("--vocab_size", type=int, default=32000, help="Vocabulary size")
     args = parser.parse_args()
     

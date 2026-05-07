@@ -9,6 +9,107 @@ import re
 import unicodedata
 from html import unescape
 
+TEXT_FILE_SUFFIXES = {
+    ".md",
+    ".txt",
+    ".srt",
+    ".vtt",
+    ".ass",
+    ".ssa",
+    ".epub",
+    ".pdf",
+}
+
+CODE_FILE_SUFFIXES = {
+    ".c",
+    ".h",
+    ".cpp",
+    ".hpp",
+    ".cc",
+    ".cxx",
+    ".hh",
+    ".hxx",
+    ".cs",
+    ".go",
+    ".java",
+    ".js",
+    ".jsx",
+    ".mjs",
+    ".cjs",
+    ".ts",
+    ".tsx",
+    ".py",
+    ".php",
+    ".phtml",
+    ".rb",
+    ".rs",
+    ".sql",
+    ".kt",
+    ".kts",
+    ".swift",
+    ".scala",
+    ".r",
+    ".m",
+    ".pl",
+    ".pm",
+    ".sh",
+    ".bash",
+    ".zsh",
+    ".lua",
+    ".dart",
+    ".mm",
+    ".ex",
+    ".exs",
+    ".hs",
+    ".clj",
+    ".cljs",
+    ".cljc",
+    ".groovy",
+    ".ps1",
+    ".psm1",
+    ".vb",
+    ".asm",
+    ".s",
+    ".f",
+    ".f90",
+    ".f95",
+    ".f03",
+    ".f08",
+    ".cob",
+    ".cbl",
+    ".erl",
+    ".hrl",
+    ".jl",
+    ".ml",
+    ".mli",
+    ".fs",
+    ".fsi",
+    ".fsx",
+    ".nim",
+    ".zig",
+    ".sol",
+    ".html",
+    ".htm",
+    ".css",
+    ".scss",
+    ".sass",
+    ".less",
+    ".vue",
+    ".svelte",
+}
+
+DIRECTORIES_TO_SKIP = {
+    ".git",
+    ".hg",
+    ".svn",
+    ".venv",
+    "venv",
+    "__pycache__",
+    "node_modules",
+    "dist",
+    "build",
+}
+
 
 def _recommended_num_workers():
     cpu_count = os.cpu_count() or 1
@@ -45,6 +146,65 @@ def normalize_text(text):
     return text.strip()
 
 
+def _language_label_for_path(path):
+    suffix = Path(path).suffix.lower()
+    if suffix in {".c", ".h"}:
+        return "c"
+    if suffix in {".cpp", ".hpp", ".cc", ".cxx", ".hh", ".hxx"}:
+        return "cpp"
+    if suffix in {".js", ".jsx", ".mjs", ".cjs"}:
+        return "javascript"
+    if suffix in {".ts", ".tsx"}:
+        return "typescript"
+    if suffix in {".py"}:
+        return "python"
+    if suffix in {".java"}:
+        return "java"
+    if suffix in {".rs"}:
+        return "rust"
+    if suffix in {".sql"}:
+        return "sql"
+    if suffix in {".html", ".htm"}:
+        return "html"
+    if suffix in {".css", ".scss", ".sass", ".less"}:
+        return "css"
+    return suffix.lstrip(".") or "text"
+
+
+def iter_training_files(data_dir):
+    """Yield supported training files recursively in a stable order."""
+    data_path = Path(data_dir)
+    files = []
+    for file_path in data_path.rglob("*"):
+        if not file_path.is_file():
+            continue
+        if any(part in DIRECTORIES_TO_SKIP for part in file_path.parts):
+            continue
+        suffix = file_path.suffix.lower()
+        if suffix in TEXT_FILE_SUFFIXES or suffix in CODE_FILE_SUFFIXES:
+            files.append(file_path)
+    return sorted(files)
+
+
+def _document_prefix(file_path, root_dir=None):
+    path = Path(file_path)
+    if root_dir is not None:
+        try:
+            relative = path.relative_to(Path(root_dir))
+        except ValueError:
+            relative = path
+    else:
+        relative = path
+
+    directory = relative.parent.as_posix() if relative.parent != Path(".") else "."
+    language = _language_label_for_path(path)
+    return (
+        f"File: {relative.as_posix()}\n"
+        f"Directory: {directory}\n"
+        f"Language: {language}\n\n"
+    )
+
+
 def extract_text_from_txt(txt_path):
     """Extract text from .txt files with robust encoding fallback."""
     encodings = ["utf-8", "utf-8-sig", "cp1252", "latin-1"]
@@ -61,6 +221,14 @@ def extract_text_from_txt(txt_path):
     with open(txt_path, "rb") as f:
         raw = f.read()
     return normalize_text(raw.decode("utf-8", errors="ignore"))
+
+
+def extract_text_from_code(code_path, root_dir=None):
+    """Extract code files as plain text, prefixed with path metadata."""
+    text = extract_text_from_txt(code_path)
+    if not text:
+        return ""
+    return _document_prefix(code_path, root_dir=root_dir) + text
 
 
 def _clean_subtitle_line(line):
@@ -262,19 +430,26 @@ def extract_text_from_pdf(pdf_path):
         return ""
 
 
-def extract_text_from_file(file_path):
+def extract_text_from_file(file_path, root_dir=None):
     suffix = Path(file_path).suffix.lower()
     if suffix == ".md":
         with open(file_path, "r", encoding="utf-8") as f:
-            return normalize_text(strip_markdown(f.read()))
+            text = normalize_text(strip_markdown(f.read()))
+            return (_document_prefix(file_path, root_dir=root_dir) + text) if text else ""
     if suffix == ".txt":
-        return extract_text_from_txt(file_path)
+        text = extract_text_from_txt(file_path)
+        return (_document_prefix(file_path, root_dir=root_dir) + text) if text else ""
     if suffix in {".srt", ".vtt", ".ass", ".ssa"}:
-        return extract_text_from_subtitles(file_path)
+        text = extract_text_from_subtitles(file_path)
+        return (_document_prefix(file_path, root_dir=root_dir) + text) if text else ""
     if suffix == ".epub":
-        return extract_text_from_epub(file_path)
+        text = extract_text_from_epub(file_path)
+        return (_document_prefix(file_path, root_dir=root_dir) + text) if text else ""
     if suffix == ".pdf":
-        return extract_text_from_pdf(file_path)
+        text = extract_text_from_pdf(file_path)
+        return (_document_prefix(file_path, root_dir=root_dir) + text) if text else ""
+    if suffix in CODE_FILE_SUFFIXES:
+        return extract_text_from_code(file_path, root_dir=root_dir)
     return ""
 
 def prepare_data(data_dir, tokenizer_model="tokenizer.model", out_file="data.bin"):
@@ -283,14 +458,10 @@ def prepare_data(data_dir, tokenizer_model="tokenizer.model", out_file="data.bin
     
     token_chunks = []
     total_tokens = 0
-    # Search for supported text-bearing files.
-    files = []
-    for ext in ["*.md", "*.txt", "*.srt", "*.vtt", "*.ass", "*.ssa", "*.epub", "*.pdf"]:
-        files.extend(list(Path(data_dir).rglob(ext)))
-    files = sorted(files)
+    files = iter_training_files(data_dir)
     
     for file_path in files:
-        text = extract_text_from_file(str(file_path))
+        text = extract_text_from_file(str(file_path), root_dir=data_dir)
             
         if not text:
             continue
